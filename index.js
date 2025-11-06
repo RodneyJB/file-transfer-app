@@ -45,10 +45,31 @@ app.post('/file-handler', async (req, res) => {
         const assets = updates.flatMap(u => u.assets || []);
         console.log('📎 Found update files:', assets.map(a => a.name));
 
-        const pdfs = assets.filter(file => file.name && file.name.toLowerCase().endsWith('.pdf'));
+        let pdfs = assets.filter(file => file.name && file.name.toLowerCase().endsWith('.pdf'));
+        
+        // If no PDFs found, wait and retry (Monday.com webhook fires before upload completes)
         if (pdfs.length === 0) {
-            console.log('⚠️ No PDF files found.');
-            return res.send({ message: 'No PDF files found.' });
+            console.log('⚠️ No PDF files found initially, waiting 3 seconds and retrying...');
+            
+            await new Promise(resolve => setTimeout(resolve, 3000));
+            
+            // Retry the same simple query
+            const retryResponse = await axios.post(
+                'https://api.monday.com/v2',
+                { query },
+                { headers: { Authorization: MONDAY_API_KEY } }
+            );
+            
+            const retryUpdates = retryResponse.data?.data?.items?.[0]?.updates || [];
+            const retryAssets = retryUpdates.flatMap(u => u.assets || []);
+            console.log('📎 Retry - Found update files:', retryAssets.map(a => a.name));
+            
+            pdfs = retryAssets.filter(file => file.name && file.name.toLowerCase().endsWith('.pdf'));
+            
+            if (pdfs.length === 0) {
+                console.log('⚠️ Still no PDF files found after retry.');
+                return res.send({ message: 'No PDF files found after retry.' });
+            }
         }
 
         // Process PDFs: create separate items for multiple PDFs with suffixes
