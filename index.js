@@ -59,10 +59,30 @@ app.post('/file-handler', async (req, res) => {
         const query = `
             query {
                 items(ids: ${itemId}) {
+                    name
+                    assets {
+                        public_url
+                        name
+                        file_extension
+                    }
                     updates {
                         assets {
                             public_url
                             name
+                            file_extension
+                        }
+                    }
+                    column_values {
+                        id
+                        type
+                        ... on FileValue {
+                            files {
+                                asset {
+                                    public_url
+                                    name
+                                    file_extension
+                                }
+                            }
                         }
                     }
                 }
@@ -84,32 +104,83 @@ app.post('/file-handler', async (req, res) => {
             return res.status(404).json({ error: 'Item not found' });
         }
 
-        const updates = response.data.data.items[0].updates || [];
-        const assets = updates.flatMap(u => u.assets || []);
-        console.log('📎 Found update files:', assets.map(a => a.name));
+        const item = response.data.data.items[0];
+        console.log('🔍 Full item response:', JSON.stringify(item, null, 2));
+
+        // Collect files from multiple sources
+        let allAssets = [];
+
+        // 1. Files from updates
+        const updates = item.updates || [];
+        const updateAssets = updates.flatMap(u => u.assets || []);
+        allAssets.push(...updateAssets);
+        console.log('📎 Found update files:', updateAssets.map(a => a.name));
+
+        // 2. Files directly attached to item
+        const itemAssets = item.assets || [];
+        allAssets.push(...itemAssets);
+        console.log('📎 Found item assets:', itemAssets.map(a => a.name));
+
+        // 3. Files in file columns
+        const columnFiles = [];
+        const columns = item.column_values || [];
+        columns.forEach(col => {
+            if (col.type === 'file' && col.files) {
+                col.files.forEach(file => {
+                    if (file.asset) {
+                        columnFiles.push(file.asset);
+                    }
+                });
+            }
+        });
+        allAssets.push(...columnFiles);
+        console.log('📎 Found column files:', columnFiles.map(a => a.name));
+
+        // Remove duplicates based on name and URL
+        const uniqueAssets = allAssets.filter((asset, index, arr) => 
+            index === arr.findIndex(a => a.name === asset.name && a.public_url === asset.public_url)
+        );
+
+        console.log('📎 Total unique files found:', uniqueAssets.map(a => a.name));
 
         // Filter for PDF files only, ignoring other file types
-        const pdfs = assets.filter(file => {
-            if (!file.name || !file.public_url) return false;
+        const pdfs = uniqueAssets.filter(file => {
+            if (!file.name || !file.public_url) {
+                console.log(`⚠️ Skipping file with missing name or URL:`, file);
+                return false;
+            }
             const fileName = file.name.toLowerCase().trim();
-            return fileName.endsWith('.pdf');
+            const isPdf = fileName.endsWith('.pdf') || file.file_extension === 'pdf';
+            console.log(`🔍 Checking file: ${file.name} - isPdf: ${isPdf}`);
+            return isPdf;
         });
         
         // Log all files found for debugging
-        const allFileTypes = assets.map(f => f.name).join(', ');
+        const allFileTypes = uniqueAssets.map(f => f.name || 'unnamed').join(', ');
         console.log(`📁 All files found: ${allFileTypes}`);
+        console.log(`📁 File details:`, uniqueAssets.map(f => ({
+            name: f.name,
+            extension: f.file_extension,
+            hasUrl: !!f.public_url
+        })));
         
         if (pdfs.length === 0) {
             console.log('⚠️ No PDF files found among the uploaded files.');
             return res.json({ 
-                message: 'No PDF files found in item updates.',
-                allFiles: assets.map(f => f.name),
-                totalFiles: assets.length
+                message: 'No PDF files found in item files.',
+                allFiles: uniqueAssets.map(f => f.name || 'unnamed'),
+                fileDetails: uniqueAssets.map(f => ({
+                    name: f.name,
+                    extension: f.file_extension,
+                    type: 'unknown'
+                })),
+                totalFiles: uniqueAssets.length,
+                searchedLocations: ['updates.assets', 'item.assets', 'column_values.files']
             });
         }
 
         console.log(`🎯 Found ${pdfs.length} PDF file(s) to process: ${pdfs.map(p => p.name).join(', ')}`);
-        console.log(`📊 Other file types ignored: ${assets.length - pdfs.length}`)
+        console.log(`📊 Other file types ignored: ${uniqueAssets.length - pdfs.length}`)
 
         // Process PDFs: ALL items get suffixes when there are multiple PDFs
         for (let i = 0; i < pdfs.length; i++) {
@@ -294,7 +365,8 @@ app.post('/file-handler', async (req, res) => {
             message: processedMessage,
             processedPDFs: pdfs.map(p => p.name),
             totalPDFs: pdfs.length,
-            ignoredFiles: assets.length - pdfs.length
+            ignoredFiles: uniqueAssets.length - pdfs.length,
+            allFilesFound: uniqueAssets.map(f => f.name)
         });
 
     } catch (error) {
