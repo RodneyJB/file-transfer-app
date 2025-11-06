@@ -55,32 +55,40 @@ app.post('/file-handler', async (req, res) => {
         return res.status(500).json({ error: 'Monday API key not configured' });
     }
 
+    // Log API key format (partially masked for security)
+    const maskedKey = MONDAY_API_KEY.substring(0, 10) + '...' + MONDAY_API_KEY.substring(MONDAY_API_KEY.length - 10);
+    console.log('🔑 Using API key:', maskedKey);
+
     try {
+        // First, let's try to get the item with board context and better error handling
         const query = `
             query {
-                items(ids: ${itemId}) {
-                    name
-                    assets {
-                        public_url
+                boards(ids: ${boardId}) {
+                    items(ids: [${itemId}]) {
+                        id
                         name
-                        file_extension
-                    }
-                    updates {
                         assets {
                             public_url
                             name
                             file_extension
                         }
-                    }
-                    column_values {
-                        id
-                        type
-                        ... on FileValue {
-                            files {
-                                asset {
-                                    public_url
-                                    name
-                                    file_extension
+                        updates {
+                            assets {
+                                public_url
+                                name
+                                file_extension
+                            }
+                        }
+                        column_values {
+                            id
+                            type
+                            ... on FileValue {
+                                files {
+                                    asset {
+                                        public_url
+                                        name
+                                        file_extension
+                                    }
                                 }
                             }
                         }
@@ -88,6 +96,9 @@ app.post('/file-handler', async (req, res) => {
                 }
             }
         `;
+
+        console.log('🔍 Query details:', { itemId, boardId, columnId });
+        console.log('📋 GraphQL Query:', query);
 
         console.log('📦 Sending GraphQL query...');
         const response = await axios.post(
@@ -99,13 +110,99 @@ app.post('/file-handler', async (req, res) => {
             }
         );
 
-        if (!response.data?.data?.items?.[0]) {
-            console.log('❌ No item found with ID:', itemId);
-            return res.status(404).json({ error: 'Item not found' });
+        console.log('📋 Full API response:', JSON.stringify(response.data, null, 2));
+
+        // Check for API errors first
+        if (response.data?.errors) {
+            console.log('❌ GraphQL errors:', response.data.errors);
+            return res.status(400).json({ 
+                error: 'GraphQL query failed', 
+                details: response.data.errors 
+            });
         }
 
-        const item = response.data.data.items[0];
-        console.log('🔍 Full item response:', JSON.stringify(item, null, 2));
+        // Check if board exists
+        if (!response.data?.data?.boards?.[0]) {
+            console.log('❌ No board found with ID:', boardId);
+            return res.status(404).json({ error: `Board not found: ${boardId}` });
+        }
+
+        // Check if item exists in board
+        const board = response.data.data.boards[0];
+        if (!board.items?.[0]) {
+            console.log('❌ No item found with ID:', itemId, 'in board:', boardId);
+            
+            // Let's try a fallback query without board context
+            console.log('🔄 Trying fallback query without board context...');
+            const fallbackQuery = `
+                query {
+                    items(ids: [${itemId}]) {
+                        id
+                        name
+                        board {
+                            id
+                        }
+                        assets {
+                            public_url
+                            name
+                            file_extension
+                        }
+                        updates {
+                            assets {
+                                public_url
+                                name
+                                file_extension
+                            }
+                        }
+                        column_values {
+                            id
+                            type
+                            ... on FileValue {
+                                files {
+                                    asset {
+                                        public_url
+                                        name
+                                        file_extension
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            `;
+
+            const fallbackResponse = await axios.post(
+                'https://api.monday.com/v2',
+                { query: fallbackQuery },
+                { 
+                    headers: { Authorization: MONDAY_API_KEY },
+                    timeout: 30000
+                }
+            );
+
+            console.log('📋 Fallback response:', JSON.stringify(fallbackResponse.data, null, 2));
+
+            if (!fallbackResponse.data?.data?.items?.[0]) {
+                return res.status(404).json({ 
+                    error: `Item ${itemId} not found in board ${boardId} or globally`,
+                    itemId,
+                    boardId
+                });
+            }
+
+            const fallbackItem = fallbackResponse.data.data.items[0];
+            console.log(`✅ Found item ${itemId} in board ${fallbackItem.board?.id} (expected ${boardId})`);
+            
+            if (fallbackItem.board?.id != boardId) {
+                console.log(`⚠️ Warning: Item is in board ${fallbackItem.board?.id}, not ${boardId}`);
+            }
+
+            var item = fallbackItem;
+        } else {
+            var item = board.items[0];
+        }
+
+        console.log('🔍 Working with item:', JSON.stringify(item, null, 2));
 
         // Collect files from multiple sources
         let allAssets = [];
