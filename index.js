@@ -73,15 +73,13 @@ app.post('/file-handler', async (req, res) => {
         }
 
         // Process PDFs: create separate items for multiple PDFs with suffixes
-        // SIMPLE FIX: Only process 1 file to prevent duplicates
-        const maxFiles = 1;
-        for (let i = 0; i < Math.min(pdfs.length, maxFiles); i++) {
+        for (let i = 0; i < pdfs.length; i++) {
             const pdf = pdfs[i];
             const totalPdfs = pdfs.length;
             const suffix = totalPdfs > 1 ? ` [${i + 1}of${totalPdfs}]` : '';
             const modifiedFilename = pdf.name.replace('.pdf', `${suffix}.pdf`);
             
-            console.log(`📤 Processing PDF ${i + 1}/${totalPdfs}: ${modifiedFilename} (Limited to ${maxFiles} file)`);
+            console.log(`📤 Processing PDF ${i + 1}/${totalPdfs}: ${modifiedFilename}`);
 
             let targetItemId = itemId;
 
