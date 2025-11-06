@@ -60,35 +60,36 @@ app.post('/file-handler', async (req, res) => {
     console.log('🔑 Using API key:', maskedKey);
 
     try {
-        // First, let's try to get the item with board context and better error handling
+        // Use the correct Monday.com GraphQL schema
         const query = `
             query {
-                boards(ids: ${boardId}) {
-                    items(ids: [${itemId}]) {
+                items(ids: [${itemId}]) {
+                    id
+                    name
+                    board {
                         id
+                    }
+                    assets {
+                        public_url
                         name
+                        file_extension
+                    }
+                    updates {
                         assets {
                             public_url
                             name
                             file_extension
                         }
-                        updates {
-                            assets {
-                                public_url
-                                name
-                                file_extension
-                            }
-                        }
-                        column_values {
-                            id
-                            type
-                            ... on FileValue {
-                                files {
-                                    asset {
-                                        public_url
-                                        name
-                                        file_extension
-                                    }
+                    }
+                    column_values {
+                        id
+                        type
+                        ... on FileValue {
+                            files {
+                                ... on FileAssetValue {
+                                    public_url
+                                    name
+                                    file_extension
                                 }
                             }
                         }
@@ -121,85 +122,22 @@ app.post('/file-handler', async (req, res) => {
             });
         }
 
-        // Check if board exists
-        if (!response.data?.data?.boards?.[0]) {
-            console.log('❌ No board found with ID:', boardId);
-            return res.status(404).json({ error: `Board not found: ${boardId}` });
+        // Check if item exists
+        if (!response.data?.data?.items?.[0]) {
+            console.log('❌ No item found with ID:', itemId);
+            return res.status(404).json({ 
+                error: `Item ${itemId} not found`,
+                itemId,
+                boardId
+            });
         }
 
-        // Check if item exists in board
-        const board = response.data.data.boards[0];
-        if (!board.items?.[0]) {
-            console.log('❌ No item found with ID:', itemId, 'in board:', boardId);
-            
-            // Let's try a fallback query without board context
-            console.log('🔄 Trying fallback query without board context...');
-            const fallbackQuery = `
-                query {
-                    items(ids: [${itemId}]) {
-                        id
-                        name
-                        board {
-                            id
-                        }
-                        assets {
-                            public_url
-                            name
-                            file_extension
-                        }
-                        updates {
-                            assets {
-                                public_url
-                                name
-                                file_extension
-                            }
-                        }
-                        column_values {
-                            id
-                            type
-                            ... on FileValue {
-                                files {
-                                    asset {
-                                        public_url
-                                        name
-                                        file_extension
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            `;
-
-            const fallbackResponse = await axios.post(
-                'https://api.monday.com/v2',
-                { query: fallbackQuery },
-                { 
-                    headers: { Authorization: MONDAY_API_KEY },
-                    timeout: 30000
-                }
-            );
-
-            console.log('📋 Fallback response:', JSON.stringify(fallbackResponse.data, null, 2));
-
-            if (!fallbackResponse.data?.data?.items?.[0]) {
-                return res.status(404).json({ 
-                    error: `Item ${itemId} not found in board ${boardId} or globally`,
-                    itemId,
-                    boardId
-                });
-            }
-
-            const fallbackItem = fallbackResponse.data.data.items[0];
-            console.log(`✅ Found item ${itemId} in board ${fallbackItem.board?.id} (expected ${boardId})`);
-            
-            if (fallbackItem.board?.id != boardId) {
-                console.log(`⚠️ Warning: Item is in board ${fallbackItem.board?.id}, not ${boardId}`);
-            }
-
-            var item = fallbackItem;
-        } else {
-            var item = board.items[0];
+        const item = response.data.data.items[0];
+        console.log(`✅ Found item ${itemId} in board ${item.board?.id}`);
+        
+        // Verify the item is in the expected board
+        if (item.board?.id != boardId) {
+            console.log(`⚠️ Warning: Item is in board ${item.board?.id}, expected ${boardId}`);
         }
 
         console.log('🔍 Working with item:', JSON.stringify(item, null, 2));
@@ -222,10 +160,13 @@ app.post('/file-handler', async (req, res) => {
         const columnFiles = [];
         const columns = item.column_values || [];
         columns.forEach(col => {
+            console.log(`🔍 Checking column ${col.id}, type: ${col.type}`);
             if (col.type === 'file' && col.files) {
                 col.files.forEach(file => {
-                    if (file.asset) {
-                        columnFiles.push(file.asset);
+                    console.log(`🔍 Found file in column:`, file);
+                    // Files are now direct FileAssetValue objects
+                    if (file.public_url && file.name) {
+                        columnFiles.push(file);
                     }
                 });
             }
