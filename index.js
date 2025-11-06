@@ -88,28 +88,42 @@ app.post('/file-handler', async (req, res) => {
         const assets = updates.flatMap(u => u.assets || []);
         console.log('📎 Found update files:', assets.map(a => a.name));
 
-        const pdfs = assets.filter(file => 
-            file.name && file.name.toLowerCase().endsWith('.pdf') && file.public_url
-        );
+        // Filter for PDF files only, ignoring other file types
+        const pdfs = assets.filter(file => {
+            if (!file.name || !file.public_url) return false;
+            const fileName = file.name.toLowerCase().trim();
+            return fileName.endsWith('.pdf');
+        });
+        
+        // Log all files found for debugging
+        const allFileTypes = assets.map(f => f.name).join(', ');
+        console.log(`📁 All files found: ${allFileTypes}`);
         
         if (pdfs.length === 0) {
-            console.log('⚠️ No PDF files found.');
-            return res.json({ message: 'No PDF files found in item updates.' });
+            console.log('⚠️ No PDF files found among the uploaded files.');
+            return res.json({ 
+                message: 'No PDF files found in item updates.',
+                allFiles: assets.map(f => f.name),
+                totalFiles: assets.length
+            });
         }
 
-        console.log(`🎯 Found ${pdfs.length} PDF file(s) to process`)
+        console.log(`🎯 Found ${pdfs.length} PDF file(s) to process: ${pdfs.map(p => p.name).join(', ')}`);
+        console.log(`📊 Other file types ignored: ${assets.length - pdfs.length}`)
 
-        // Process PDFs: first one goes to original item, others create new items
+        // Process PDFs: ALL items get suffixes when there are multiple PDFs
         for (let i = 0; i < pdfs.length; i++) {
             const pdf = pdfs[i];
             const totalPdfs = pdfs.length;
+            // Always add suffix when there are multiple PDFs (including the first one)
             const suffix = totalPdfs > 1 ? ` [${i + 1}of${totalPdfs}]` : '';
             const modifiedFilename = pdf.name.replace('.pdf', `${suffix}.pdf`);
             
-            console.log(`📤 Processing ${i + 1}/${totalPdfs}: ${modifiedFilename}`);
+            console.log(`📤 Processing PDF ${i + 1}/${totalPdfs}: ${modifiedFilename}`);
 
             try {
                 let targetItemId = itemId;
+                let isOriginalItem = (i === 0);
 
                 // Create new item for additional PDFs (not the first one)
                 if (i > 0) {
@@ -156,6 +170,53 @@ app.post('/file-handler', async (req, res) => {
                     
                     // Add delay to avoid rate limiting
                     await new Promise(resolve => setTimeout(resolve, 1000));
+                } else if (totalPdfs > 1) {
+                    // Update original item name to include [1of X] suffix when there are multiple PDFs
+                    console.log(`🏷️ Updating original item name to include suffix`);
+                    
+                    // Get original item name first
+                    const itemQuery = `
+                        query {
+                            items(ids: ${itemId}) {
+                                name
+                            }
+                        }
+                    `;
+                    
+                    const itemResponse = await axios.post(
+                        'https://api.monday.com/v2',
+                        { query: itemQuery },
+                        { headers: { Authorization: MONDAY_API_KEY } }
+                    );
+                    
+                    const originalName = itemResponse.data?.data?.items?.[0]?.name || 'Item';
+                    // Only add suffix if it's not already there
+                    if (!originalName.includes('[1of')) {
+                        const newItemName = `${originalName} [1of${totalPdfs}]`;
+                        
+                        // Update original item name
+                        const updateItemMutation = `
+                            mutation {
+                                change_simple_column_value (
+                                    board_id: ${boardId},
+                                    item_id: ${itemId},
+                                    column_id: "name",
+                                    value: "${newItemName}"
+                                ) {
+                                    id
+                                }
+                            }
+                        `;
+                        
+                        await axios.post(
+                            'https://api.monday.com/v2',
+                            { query: updateItemMutation },
+                            { headers: { Authorization: MONDAY_API_KEY } }
+                        );
+                        
+                        console.log(`✅ Updated original item name to: ${newItemName}`);
+                        await new Promise(resolve => setTimeout(resolve, 1000));
+                    }
                 }
 
                 // Download PDF file with retry logic
@@ -225,8 +286,15 @@ app.post('/file-handler', async (req, res) => {
             }
         }
 
+        const processedMessage = pdfs.length === 1 
+            ? `Processed 1 PDF file successfully.`
+            : `Processed ${pdfs.length} PDF files. Original item updated with [1of${pdfs.length}] suffix, ${pdfs.length - 1} new items created.`;
+            
         res.send({ 
-            message: `Processed ${pdfs.length} PDF(s). First PDF added to original item, additional PDFs created as new items with suffixes.` 
+            message: processedMessage,
+            processedPDFs: pdfs.map(p => p.name),
+            totalPDFs: pdfs.length,
+            ignoredFiles: assets.length - pdfs.length
         });
 
     } catch (error) {
